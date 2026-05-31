@@ -873,6 +873,68 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .av-row {{ grid-template-columns: 1fr auto; gap: .5rem 0; }}
     .av-row .av-heatmap, .av-row .av-meta {{ grid-column: 1 / -1; }}
   }}
+
+  /* ── Usage view ──────────────────────────── */
+  .usage-empty {{
+    text-align: center; padding: 2rem; color: var(--muted); font-size: .9rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  }}
+  .usage-summary {{
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: .75rem; margin-bottom: 1.25rem;
+  }}
+  .usage-stat {{
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: .9rem 1.1rem;
+  }}
+  .usage-stat-label {{ font-size: .68rem; color: var(--muted-2); text-transform: uppercase;
+                      letter-spacing: .07em; margin-bottom: .3rem; }}
+  .usage-stat-value {{ font-size: 1.35rem; font-weight: 700; color: var(--text);
+                      font-feature-settings: "tnum"; }}
+  .usage-stat-sub   {{ font-size: .72rem; color: var(--muted); margin-top: .15rem; }}
+  .usage-providers {{ display: flex; flex-direction: column; gap: .75rem; }}
+  .usage-provider-card {{
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+  }}
+  .usage-provider-header {{
+    display: flex; align-items: center; gap: .75rem;
+    padding: .7rem 1.1rem; border-bottom: 1px solid var(--border);
+  }}
+  .usage-provider-name {{ font-weight: 600; font-size: .9rem; }}
+  .usage-provider-meta {{ margin-left: auto; font-size: .72rem; color: var(--muted); }}
+  .usage-model-row {{
+    display: grid; grid-template-columns: minmax(0,1fr) 80px 80px 80px 120px;
+    gap: .75rem; align-items: center;
+    padding: .5rem 1.1rem; border-bottom: 1px solid var(--border);
+    font-size: .82rem;
+  }}
+  .usage-model-row:last-child {{ border-bottom: none; }}
+  .usage-model-row:hover {{ background: rgba(56,189,248,.03); }}
+  .usage-model-id {{ font-family: ui-monospace, monospace; font-size: .8rem;
+                    color: var(--accent); overflow: hidden; text-overflow: ellipsis; }}
+  .usage-tokens {{ color: var(--text); font-feature-settings: "tnum";
+                  text-align: right; font-family: ui-monospace, monospace; }}
+  .usage-requests {{ color: var(--muted); font-size: .76rem;
+                    text-align: right; font-family: ui-monospace, monospace; }}
+  .quota-badge {{ display: inline-block; padding: .1rem .5rem; border-radius: 5px;
+                 font-size: .7rem; font-weight: 600; font-family: ui-monospace, monospace; }}
+  .quota-good   {{ background: rgba(34,197,94,.14); color: #4ade80; border: 1px solid rgba(34,197,94,.28); }}
+  .quota-warn   {{ background: rgba(245,158,11,.14); color: #fbbf24; border: 1px solid rgba(245,158,11,.28); }}
+  .quota-low    {{ background: rgba(239,68,68,.14);  color: #f87171; border: 1px solid rgba(239,68,68,.28); }}
+  .quota-none   {{ background: rgba(148,163,184,.08); color: var(--muted-2); border: 1px solid var(--border); }}
+  .usage-col-header {{
+    padding: .4rem 1.1rem .4rem 1.1rem; font-size: .65rem; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted-2); font-weight: 500;
+    border-bottom: 1px solid var(--border); background: rgba(255,255,255,.012);
+  }}
+  @media (max-width: 700px) {{
+    .usage-model-row {{ grid-template-columns: minmax(0,1fr) 70px 70px; }}
+    .usage-model-row .usage-col-header:nth-child(4),
+    .usage-model-row .usage-col-header:nth-child(5),
+    .usage-model-row > *:nth-child(4),
+    .usage-model-row > *:nth-child(5) {{ display: none; }}
+  }}
 </style>
 </head>
 <body>
@@ -901,6 +963,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <button class="vtab" data-target="view-model">By Model</button>
   <button class="vtab" data-target="view-availability">Availability</button>
   <button class="vtab" data-target="view-changes">Changes</button>
+  <button class="vtab" data-target="view-usage">Usage</button>
 </nav>
 
 <div class="layout" id="layout">
@@ -954,6 +1017,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id="view-changes" style="display:none">
       {changes_section}
+    </div>
+    <div id="view-usage" style="display:none">
+      {usage_section}
     </div>
     <div class="suggest-card">
       <div>
@@ -1484,6 +1550,140 @@ def render_availability(provider_list, results, availability):
     return html
 
 
+def render_usage(provider_list, results, availability, usage_data):
+    """Render the Usage view from docs/usage.json + availability.json data."""
+    if not usage_data or not usage_data.get("by_model"):
+        return (
+            '<p class="usage-empty">'
+            'No usage data yet. Run <code>python usage_tracker.py</code> with '
+            '<code>LITELLM_BASE_URL</code> and <code>LITELLM_MASTER_KEY</code> set '
+            'to see per-model token usage and observed quota remaining.</p>'
+        )
+
+    period_24h = usage_data.get("period_24h", {})
+    period_7d = usage_data.get("period_7d", {})
+    by_provider = usage_data.get("by_provider", {})
+    by_model = usage_data.get("by_model", [])
+
+    def fmt_tokens(n):
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.0f}k"
+        return str(n)
+
+    # Summary stats
+    summary_html = (
+        f'<div class="usage-summary">'
+        f'<div class="usage-stat">'
+        f'<div class="usage-stat-label">Requests · 24h</div>'
+        f'<div class="usage-stat-value">{period_24h.get("total_requests", 0):,}</div>'
+        f'</div>'
+        f'<div class="usage-stat">'
+        f'<div class="usage-stat-label">Tokens · 24h</div>'
+        f'<div class="usage-stat-value">{fmt_tokens(period_24h.get("total_tokens", 0))}</div>'
+        f'</div>'
+        f'<div class="usage-stat">'
+        f'<div class="usage-stat-label">Requests · 7d</div>'
+        f'<div class="usage-stat-value">{period_7d.get("total_requests", 0):,}</div>'
+        f'</div>'
+        f'<div class="usage-stat">'
+        f'<div class="usage-stat-label">Tokens · 7d</div>'
+        f'<div class="usage-stat-value">{fmt_tokens(period_7d.get("total_tokens", 0))}</div>'
+        f'</div>'
+        f'</div>'
+    )
+
+    # Build a lookup: model → observed quota from availability
+    quota_lookup = {}
+    for pk, prov_avail in availability.items():
+        for mid, adata in prov_avail.items():
+            rl_rem = adata.get("rl_remaining")
+            rl_lim = adata.get("rl_limit")
+            rl_rst = adata.get("rl_reset")
+            if rl_rem is not None or rl_lim is not None:
+                quota_lookup[mid] = {"remaining": rl_rem, "limit": rl_lim, "reset_seconds": rl_rst}
+
+    def quota_badge(mid):
+        q = quota_lookup.get(mid)
+        if not q:
+            return '<span class="quota-badge quota-none">—</span>'
+        rem = q.get("remaining")
+        lim = q.get("limit")
+        if rem is None and lim is None:
+            return '<span class="quota-badge quota-none">—</span>'
+        if lim is not None and rem is not None:
+            pct = rem / lim if lim > 0 else 0
+            cls = "quota-good" if pct > 0.3 else "quota-warn" if pct > 0.1 else "quota-low"
+            return f'<span class="quota-badge {cls}" title="limit={lim}">{fmt_tokens(rem)} left</span>'
+        if rem is not None:
+            return f'<span class="quota-badge quota-good">{fmt_tokens(rem)} left</span>'
+        return '<span class="quota-badge quota-none">—</span>'
+
+    # Group by provider
+    by_prov_sorted = sorted(by_provider.items(), key=lambda x: -x[1]["total_tokens_7d"])
+    prov_color_map = {p["key"]: p["color"] for p in provider_list}
+
+    prov_cards_html = ""
+    for pk, pdata in by_prov_sorted:
+        pcolor = prov_color_map.get(pk, "#6366f1")
+        plabel = next((p["label"] for p in provider_list if p["key"] == pk), pk)
+        models_in_prov = [r for r in by_model if r["provider"] == pk]
+        if not models_in_prov:
+            continue
+
+        header = (
+            f'<div class="usage-provider-header">'
+            f'<span class="provider-dot" style="background:{pcolor}"></span>'
+            f'<span class="usage-provider-name">{escape(plabel)}</span>'
+            f'<span class="usage-provider-meta">'
+            f'{len(models_in_prov)} models · '
+            f'{pdata["total_requests_7d"]:,} req/7d · '
+            f'{fmt_tokens(pdata["total_tokens_7d"])} tok/7d'
+            f'</span>'
+            f'</div>'
+        )
+
+        col_headers = (
+            f'<div class="usage-model-row usage-col-header">'
+            f'<span>Model</span>'
+            f'<span style="text-align:right">Req · 24h</span>'
+            f'<span style="text-align:right">Tok · 24h</span>'
+            f'<span style="text-align:right">Tok · 7d</span>'
+            f'<span>Quota remaining</span>'
+            f'</div>'
+        )
+
+        rows_html = ""
+        for row in sorted(models_in_prov, key=lambda r: -r["usage_7d"]["total_tokens"]):
+            mid = row["model"]
+            u24 = row.get("usage_24h", {})
+            u7 = row.get("usage_7d", {})
+            rows_html += (
+                f'<div class="usage-model-row">'
+                f'<span class="usage-model-id" title="{escape(mid)}">{escape(mid)}</span>'
+                f'<span class="usage-requests">{u24.get("num_requests", 0):,}</span>'
+                f'<span class="usage-tokens">{fmt_tokens(u24.get("total_tokens", 0))}</span>'
+                f'<span class="usage-tokens">{fmt_tokens(u7.get("total_tokens", 0))}</span>'
+                f'<span>{quota_badge(mid)}</span>'
+                f'</div>'
+            )
+
+        prov_cards_html += (
+            f'<div class="usage-provider-card">'
+            f'{header}{col_headers}{rows_html}'
+            f'</div>'
+        )
+
+    if not prov_cards_html:
+        return (
+            '<p class="usage-empty">No usage records found. Make sure LiteLLM is running '
+            'and <code>usage_tracker.py</code> can reach it.</p>'
+        )
+
+    return summary_html + f'<div class="usage-providers">{prov_cards_html}</div>'
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1697,6 +1897,14 @@ def main():
         pass
     availability_html = render_availability(PROVIDERS, results, availability)
 
+    usage_data = {}
+    usage_path = OUT_DIR / "usage.json"
+    try:
+        usage_data = json.loads(usage_path.read_text())
+    except Exception:
+        pass
+    usage_html = render_usage(PROVIDERS, results, availability, usage_data)
+
     html = HTML_TEMPLATE.format(
         updated=updated,
         total_models=total_models,
@@ -1705,6 +1913,7 @@ def main():
         cross_provider_section=cross_html,
         availability_section=availability_html,
         changes_section=changes_html,
+        usage_section=usage_html,
     )
     (OUT_DIR / "index.html").write_text(html, encoding="utf-8")
     print(f"Written docs/index.html  ({total_models} models, {total_providers} providers, {len(cross_groups)} cross-provider groups)")
@@ -1720,6 +1929,7 @@ def main():
         ("availability/problems", "view-availability", "../../", "problems"),
         ("availability/stable",   "view-availability", "../../", "stable"),
         ("changes",               "view-changes",      "../",    None),
+        ("usage",                 "view-usage",        "../",    None),
     ]
     for slug, tab, base, av in entry_points:
         sub_dir = OUT_DIR / slug
@@ -1734,7 +1944,7 @@ def main():
         )
         (sub_dir / "index.html").write_text(sub_html, encoding="utf-8")
         # Mirror the JSON files so links resolve from any sub-path.
-        for jf in ("models.json", "availability.json"):
+        for jf in ("models.json", "availability.json", "usage.json"):
             src = OUT_DIR / jf
             if src.exists():
                 (sub_dir / jf).write_bytes(src.read_bytes())

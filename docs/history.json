@@ -4411,6 +4411,17 @@
         "deepseek-ai/DeepSeek-V3.1-Terminus",
         "moonshotai/Kimi-K2-Thinking"
       ]
+    },
+    {
+      "timestamp": "2026-05-31T08:22:58.576722+00:00",
+      "provider": "llm7",
+      "provider_label": "LLM7",
+      "added": [
+        "kimi-k2.6",
+        "minimax-m2.7",
+        "qwen3-235b-a22b-instruct-2507-fp8"
+      ],
+      "removed": []
     }
   ]
 }

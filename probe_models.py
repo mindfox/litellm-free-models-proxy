@@ -244,16 +244,18 @@ def do_probe(url, headers, body_bytes):
         req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT) as r:
             body = r.read().decode(errors="replace")
-            return r.status, body, None, int((time.monotonic() - t0) * 1000)
+            resp_headers = dict(r.headers)
+            return r.status, body, None, int((time.monotonic() - t0) * 1000), resp_headers
     except urllib.error.HTTPError as e:
         body = ""
         try:
             body = e.read().decode(errors="replace")
         except Exception:
             pass
-        return e.code, body, None, int((time.monotonic() - t0) * 1000)
+        resp_headers = dict(e.headers) if hasattr(e, 'headers') else {}
+        return e.code, body, None, int((time.monotonic() - t0) * 1000), resp_headers
     except Exception as e:
-        return None, "", e, int((time.monotonic() - t0) * 1000)
+        return None, "", e, int((time.monotonic() - t0) * 1000), {}
 
 
 # ── Round-robin selection ─────────────────────────────────────────────────────
@@ -324,6 +326,7 @@ def aggregate(probes_path):
         "latencies": [],
         "hourly": [[0, 0] for _ in range(24)],
         "last_ts": None, "last_status": None,
+        "rl_remaining": None, "rl_limit": None, "rl_reset": None,
     })
 
     if not probes_path.exists():
@@ -362,6 +365,14 @@ def aggregate(probes_path):
             if b["last_ts"] is None or ts > b["last_ts"]:
                 b["last_ts"] = ts
                 b["last_status"] = status
+            # Track most recent observed quota from a successful or rate-limited probe
+            if status in ("ok", "rate_limited"):
+                if row.get("rl_remaining") is not None:
+                    b["rl_remaining"] = row["rl_remaining"]
+                if row.get("rl_limit") is not None:
+                    b["rl_limit"] = row["rl_limit"]
+                if row.get("rl_reset") is not None:
+                    b["rl_reset"] = row["rl_reset"]
 
     out = defaultdict(dict)
     for (provider, model), b in bucket.items():
@@ -383,6 +394,9 @@ def aggregate(probes_path):
             "hourly_uptime": hourly,
             "last_probe_ts": b["last_ts"].isoformat() if b["last_ts"] else None,
             "last_status": b["last_status"],
+            "rl_remaining": b["rl_remaining"],
+            "rl_limit": b["rl_limit"],
+            "rl_reset": b["rl_reset"],
         }
     return dict(out)
 
@@ -472,13 +486,40 @@ def main():
         if built is None:
             return None
         url, headers, body = built
-        http, body_text, exc, latency = do_probe(url, headers, body)
+        http, body_text, exc, latency, resp_headers = do_probe(url, headers, body)
         status = classify(http, body_text, exc)
         err = None
         if status not in ("ok", "rate_limited") and body_text:
             err = body_text[:200]
         elif exc is not None:
             err = str(exc)[:200]
+
+        # Extract rate-limit headers (provider-specific)
+        rl_remaining = None
+        rl_limit = None
+        rl_reset = None
+        for hkey in resp_headers:
+            hlow = hkey.lower()
+            if rl_remaining is None and hlow in ("x-ratelimit-remaining", "x-ratelimit-requests-remaining",
+                                                  "x-quota-remaining", "quota-remaining",
+                                                  "ratelimit-remaining", "x-free-tier-remaining"):
+                try:
+                    rl_remaining = int(resp_headers[hkey])
+                except (ValueError, TypeError):
+                    pass
+            if rl_limit is None and hlow in ("x-ratelimit-limit", "x-ratelimit-requests-limit",
+                                              "ratelimit-limit", "x-quota-limit"):
+                try:
+                    rl_limit = int(resp_headers[hkey])
+                except (ValueError, TypeError):
+                    pass
+            if rl_reset is None and hlow in ("x-ratelimit-reset", "x-ratelimit-reset-requests",
+                                              "ratelimit-reset", "retry-after", "x-retry-after"):
+                try:
+                    rl_reset = int(resp_headers[hkey])
+                except (ValueError, TypeError):
+                    pass
+
         row = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "provider": provider,
@@ -488,6 +529,12 @@ def main():
             "latency_ms": latency,
             "err": err,
         }
+        if rl_remaining is not None:
+            row["rl_remaining"] = rl_remaining
+        if rl_limit is not None:
+            row["rl_limit"] = rl_limit
+        if rl_reset is not None:
+            row["rl_reset"] = rl_reset
         line = json.dumps(row, ensure_ascii=False) + "\n"
         with write_lock:
             out_f.write(line)
